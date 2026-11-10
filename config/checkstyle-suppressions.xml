@@ -1,0 +1,9 @@
+<?xml version="1.0"?>
+<!DOCTYPE suppressions PUBLIC "-//Checkstyle//DTD SuppressionFilter Configuration 1.2//EN"
+        "https://checkstyle.org/dtds/suppressions_1_2.dtd">
+<suppressions>
+  <!-- Generated long signatures are not worth wrapping in the generator; everything else still applies to them. -->
+  <suppress checks="LineLength" files="[\\/](model|params|resources)[\\/]"/>
+  <suppress checks="LineLength" files="[\\/]RaskResources\.java$"/>
+  <suppress checks="MissingJavadoc(Type|Method)" files="[\\/]src[\\/]test[\\/]"/>
+</suppressions>
