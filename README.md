@@ -39,28 +39,74 @@ other method is raised as an error instead of followed.
 
 ## Worked example
 
-Upload, create a project, wait for it, download. From [`examples/worked/WorkedExample.java`](examples/worked/WorkedExample.java):
+Upload a video, dub it, wait for the dub, download it. From [`examples/worked/WorkedExample.java`](examples/worked/WorkedExample.java):
 
 ```java
 Rask rask = Rask.builder().build(); // RASK_API_KEY and, if set, RASK_BASE_URL
+Path video = Path.of(args[0]);
+String language = "es-es";
+
+// Progress is saved next to the video, so a run that stops can be started again without paying twice: the
+// media, the price you accepted, createProject's Idempotency-Key and the job it started. Delete the file to
+// dub anew.
+Path progress = Path.of(video + "." + language + ".properties");
+Properties saved = new Properties();
+if (Files.exists(progress)) {
+    try (Reader reader = Files.newBufferedReader(progress)) {
+        saved.load(reader);
+    }
+}
 
 // Upload: the bytes go straight to storage, and completing the upload starts a media_import job.
-Job imported = rask.uploads().uploadFile(Path.of(args[0])).data();
-Job media = rask.jobs().wait(imported.id()).data();
-String mediaId = ((MediaImportJobResult) media.result()).mediaId();
+if (saved.getProperty("mediaId") == null) {
+    Job imported = rask.uploads().uploadFile(video).data();
+    Job media = rask.jobs().wait(imported.id()).data();
+    saved.setProperty("mediaId", ((MediaImportJobResult) media.result()).mediaId());
+    save(saved, progress);
+}
+String mediaId = saved.getProperty("mediaId");
 
-// Create the project and wait for transcription and translation. A paid dub is createDub, also a job.
-Job processing = rask.projects().createProject(CreateProjectRequest.builder()
-        .mediaId(mediaId)
-        .targetLanguage("es-es")
-        .build()).data();
-rask.jobs().wait(processing.id());
+// Ask what it costs. That price is the cap: the dub that follows is skipped, uncharged, if it would cost more.
+if (saved.getProperty("maxMinutes") == null) {
+    Estimate estimate = rask.projects().estimateProject(EstimateProjectRequest.builder()
+            .mediaId(mediaId)
+            .targetLanguage(language)
+            .build()).data();
+    saved.setProperty("maxMinutes", String.valueOf(estimate.totalMinutes()));
+    saved.setProperty("createKey", UUID.randomUUID().toString());
+    save(saved, progress);
+}
+int maxMinutes = Integer.parseInt(saved.getProperty("maxMinutes"));
+
+// Create the project. It dubs automatically after translation. Sent again with the same key within 24 hours,
+// the request gets the job it already started, not a second project.
+if (saved.getProperty("projectJobId") == null) {
+    Job created = rask.projects().createProject(CreateProjectRequest.builder()
+            .mediaId(mediaId)
+            .targetLanguage(language)
+            .expectedCostMinutes(maxMinutes)
+            .build(), RequestOptions.builder().idempotencyKey(saved.getProperty("createKey")).build()).data();
+    saved.setProperty("projectJobId", created.id());
+    save(saved, progress);
+}
+
+// Its job ends when translation ends, and the dub is a job of its own. wait() gives each 4 hours by default.
+Job processed = rask.jobs().wait(saved.getProperty("projectJobId")).data();
+ProjectProcessingJobResult result = (ProjectProcessingJobResult) processed.result();
+ProjectProcessingAutoDubResult autoDub = result.autoDub();
+if (!AutoDubResultState.DISPATCHED.equals(autoDub.state()) || autoDub.dubJobId() == null) {
+    // skipped: the price or the balance changed after the request, and nothing was charged.
+    throw new IllegalStateException("Project " + result.projectId() + " was not dubbed: auto_dub is "
+            + autoDub.state() + " (" + autoDub.skippedReason() + "). Call estimateDub, then createDub within "
+            + "the same cap of " + maxMinutes + " minutes.");
+}
+rask.jobs().wait(autoDub.dubJobId());
 
 // Download: an output's presigned URL lasts 1 hour and takes no API key, so a plain HTTP client fetches it.
 HttpClient http = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NORMAL).build();
-for (Output output : rask.exports().listProjectOutputs(processing.projectId()).data().data()) {
-    if (output.url() != null && output.filename() != null) {
-        Path target = Path.of(output.filename()).getFileName();
+for (Output output : rask.exports().listProjectOutputs(result.projectId()).data().data()) {
+    if (OutputKind.DUBBED_VIDEO.equals(output.kind()) && output.url() != null) {
+        Path target = Path.of("dubbed.mp4");
         HttpResponse<InputStream> download = http.send(
                 HttpRequest.newBuilder(URI.create(output.url())).build(),
                 HttpResponse.BodyHandlers.ofInputStream());
@@ -72,6 +118,18 @@ for (Output output : rask.exports().listProjectOutputs(processing.projectId()).d
             Files.copy(body, target, StandardCopyOption.REPLACE_EXISTING);
         }
         System.out.println(output.kind() + " " + download.statusCode() + " " + target);
+        return;
+    }
+}
+throw new IllegalStateException("The project has no dubbed video yet.");
+```
+
+`save` writes the progress file:
+
+```java
+private static void save(Properties saved, Path progress) throws IOException {
+    try (Writer writer = Files.newBufferedWriter(progress)) {
+        saved.store(writer, "Delete this file to dub anew.");
     }
 }
 ```
