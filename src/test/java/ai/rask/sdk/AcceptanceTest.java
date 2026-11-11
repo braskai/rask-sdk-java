@@ -1,6 +1,7 @@
 package ai.rask.sdk;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import ai.rask.sdk.errors.RaskError;
@@ -21,6 +22,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.DynamicTest;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestFactory;
 
 /**
@@ -50,6 +52,50 @@ class AcceptanceTest {
             assertEquals(Boolean.TRUE, report.get("complete"), Json.write(report));
         }));
         return tests.stream();
+    }
+
+    // The runner itself. What it cannot run or check must come out as a failure with a reason, not as an exception from
+    // the middle of the runner: /verify never hears of a scenario that ended that way.
+
+    @Test
+    void anExpectationOfACallThatNeverRanIsAFailure() throws ReflectiveOperationException {
+        Run run = new Run(); // As after a client that could not be built: no calls.
+        for (String kind : List.of("returned", "raised", "field", "header_exposed", "idempotency_key_exposed",
+                "items", "pages", "progress", "injected_values_preserved")) {
+            assertFalse(check(Map.of("kind", kind), run, List.of()).isEmpty(), kind);
+        }
+    }
+
+    @Test
+    void aNextPageAfterANextPageKeepsThePathTheFiltersAndTheNewCursor() throws Throwable {
+        Harness harness = Harness.shared();
+        harness.reset();
+        harness.post("/pages", Map.of("operationId", "listSegments", "pages", 4, "page_size", 1));
+        Run run = new Run();
+        run.operations = harness.operations();
+        run.client = Rask.builder().apiKey(harness.apiKey).baseUrl(harness.baseUrl).environment(Map.of()).build();
+        TypedCalls typed = new TypedCalls(run.client, run.operations);
+        List<Map<String, Object>> calls = List.of(
+                Map.of("helper", "first_page", "op", "listSegments", "path", Map.of("project_id", "prj-1"),
+                        "query", Map.of("limit", 1, "q", "hola")),
+                Map.of("helper", "next_page", "after_call", 0),
+                Map.of("helper", "next_page", "after_call", 1));
+        for (Map<String, Object> call : calls) {
+            Outcome outcome = new Outcome();
+            outcome.call = call;
+            runCall(run, typed, call, outcome);
+            run.calls.add(outcome);
+        }
+        List<String> cursors = new ArrayList<>();
+        for (Map<String, Object> record : harness.requests()) {
+            assertEquals(harness.prefix + "/projects/prj-1/segments", record.get("path"));
+            Map<String, Object> query = new LinkedHashMap<>(map(record.get("raw_query_params")));
+            cursors.add(String.valueOf(query.remove("cursor")));
+            assertEquals(Map.of("limit", "1", "q", "hola"), query);
+        }
+        assertEquals(3, cursors.size());
+        assertEquals("null", cursors.get(0));
+        assertEquals(3, Set.copyOf(cursors).size(), () -> "each page has a cursor of its own: " + cursors);
     }
 
     private static void runScenario(Harness harness, String id) throws Exception {
@@ -168,8 +214,14 @@ class AcceptanceTest {
                 Outcome before = run.calls.get(((Number) call.get("after_call")).intValue());
                 Map<String, Object> next = new LinkedHashMap<>(map(before.call.get("query")));
                 next.put("cursor", ((RaskValue) before.response.data()).get("next_cursor"));
-                outcome.response = typed.call((String) before.call.get("op"), map(before.call.get("path")), next,
-                        null, null, null);
+                // The call is kept as it was sent, for a next_page after this one: the scenario's own entry names
+                // neither the operation nor its path and filters.
+                Map<String, Object> sent = new LinkedHashMap<>(call);
+                sent.put("op", before.call.get("op"));
+                sent.put("path", before.call.get("path"));
+                sent.put("query", next);
+                outcome.call = sent;
+                outcome.response = typed.call((String) sent.get("op"), map(sent.get("path")), next, null, null, null);
                 return;
             }
             case "sweep_operations":
@@ -354,6 +406,9 @@ class AcceptanceTest {
 
     private static List<String> checkHeader(Map<String, Object> expectation, Outcome outcome,
             List<Map<String, Object>> records) {
+        if (outcome == null) {
+            return List.of("no call");
+        }
         String name = (String) expectation.get("name");
         String value;
         if (outcome.response != null) {
@@ -386,6 +441,9 @@ class AcceptanceTest {
 
     private static List<String> checkKey(Map<String, Object> expectation, Outcome outcome,
             List<Map<String, Object>> records) {
+        if (outcome == null) {
+            return List.of("no call");
+        }
         String key = outcome.response != null ? outcome.response.idempotencyKey()
                 : outcome.error instanceof RaskError ? ((RaskError) outcome.error).idempotencyKey() : null;
         if (key == null) {

@@ -18,6 +18,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
+import java.security.cert.CertificateException;
 import java.time.Duration;
 import java.util.List;
 import java.util.Locale;
@@ -44,6 +45,7 @@ public final class Transport {
     private static final String KEY_IN_USE = "idempotency_key_in_use";
     private static final int MAX_KEY_IN_USE_RETRIES = 3;
     private static final int MAX_REDIRECTS = 5;
+    private static final int MAX_PORT = 65_535;
     private static final double BACKOFF_START_MS = 500;
     private static final double BACKOFF_MAX_MS = 30_000;
     private static final double BACKOFF_FACTOR = 1.5;
@@ -175,7 +177,7 @@ public final class Transport {
                 retry = true;
             } catch (IOException e) {
                 failure = new RaskConnectionError("Connection failed on " + call.operation.id() + ": " + e, key, e);
-                retry = true;
+                retry = mayPass(e);
             }
             if (!retry) {
                 throw failure;
@@ -199,6 +201,19 @@ public final class Transport {
             thisAttempt = left.compareTo(attemptTimeout) < 0 && !left.isNegative() && !left.isZero()
                     ? left : attemptTimeout;
         }
+    }
+
+    /**
+     * Whether a failed connection may work on a later attempt. A certificate that fails verification will not: it is
+     * the same on every attempt, so a call or a wait that retried it would only report it later.
+     */
+    static boolean mayPass(Throwable failure) {
+        for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+            if (cause instanceof CertificateException) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static long backoffMillis(int attempt) {
@@ -349,7 +364,12 @@ public final class Transport {
         try {
             URI target = current.resolve(location);
             String scheme = target.getScheme();
-            return "http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme) ? target : null;
+            if (!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme)) {
+                return null;
+            }
+            // A target no request can be made of is not followed either, like a Location that is not a URL: the
+            // redirect is the answer.
+            return target.getHost() != null && target.getPort() <= MAX_PORT ? target : null;
         } catch (IllegalArgumentException e) {
             return null;
         }
@@ -444,6 +464,11 @@ public final class Transport {
             }
             if (cause instanceof IOException) {
                 throw (IOException) cause;
+            }
+            if (cause instanceof IllegalArgumentException) {
+                // The HTTP client's word for a request it cannot send at all, a port out of range for one. That is
+                // no failure of the connection, and no retry would mend it.
+                throw new IllegalArgumentException(cause.getMessage(), cause);
             }
             throw new IOException(String.valueOf(cause), cause);
         }

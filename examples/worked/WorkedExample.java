@@ -4,11 +4,14 @@ import ai.rask.sdk.model.Job;
 import ai.rask.sdk.model.MediaImportJobResult;
 import ai.rask.sdk.model.Output;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 
 /** The README's worked example: upload a file, create a project, wait for it, download. Compiled and run by tests. */
 public final class WorkedExample {
@@ -35,9 +38,17 @@ public final class WorkedExample {
         for (Output output : rask.exports().listProjectOutputs(processing.projectId()).data().data()) {
             if (output.url() != null && output.filename() != null) {
                 Path target = Path.of(output.filename()).getFileName();
-                HttpResponse<Path> saved = http.send(HttpRequest.newBuilder(URI.create(output.url())).build(),
-                        HttpResponse.BodyHandlers.ofFile(target));
-                System.out.println(output.kind() + " " + saved.statusCode() + " " + target);
+                HttpResponse<InputStream> download = http.send(
+                        HttpRequest.newBuilder(URI.create(output.url())).build(),
+                        HttpResponse.BodyHandlers.ofInputStream());
+                try (InputStream body = download.body()) {
+                    // Storage answers an expired URL with an error page, which must not be saved as the file.
+                    if (download.statusCode() != 200) {
+                        throw new IOException(output.kind() + ": the download answered " + download.statusCode());
+                    }
+                    Files.copy(body, target, StandardCopyOption.REPLACE_EXISTING);
+                }
+                System.out.println(output.kind() + " " + download.statusCode() + " " + target);
             }
         }
     }

@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import ai.rask.sdk.errors.InsufficientBalanceError;
@@ -14,6 +15,7 @@ import ai.rask.sdk.errors.RaskConfigError;
 import ai.rask.sdk.errors.RaskConnectionError;
 import ai.rask.sdk.errors.RaskError;
 import ai.rask.sdk.errors.RateLimitError;
+import ai.rask.sdk.errors.WaitTimeoutError;
 import ai.rask.sdk.internal.SdkVersion;
 import ai.rask.sdk.model.Cost;
 import ai.rask.sdk.model.CreateDubRequest;
@@ -153,6 +155,30 @@ class TypedSurfaceTest {
         assertEquals(6, walk.stream().count());
     }
 
+    /** Every page answers with the same cursor: the walk hands out what it was given, then stops with an error. */
+    @Test
+    void aListThatRepeatsACursorIsAnErrorNotAnEndlessWalk() {
+        harness.script("listProjects",
+                Map.of("patch", Map.of("next_cursor", "again", "has_more", true), "repeat", "forever"));
+        int perPage = rask.projects().listProjects().data().data().size();
+        harness.delete("/requests");
+        List<String> seen = new ArrayList<>();
+        RaskError error = assertThrows(RaskError.class, () -> {
+            for (Project project : rask.projects().listProjectsAutoPaging()) {
+                seen.add(project.id());
+                // Without the check the walk has no end, and this test has to have one.
+                if (seen.size() == 20 * perPage) {
+                    break;
+                }
+            }
+        });
+        assertTrue(error.getMessage().contains("cursor"), error.getMessage());
+        assertEquals(200, error.status());
+        assertNotNull(error.requestId());
+        assertEquals(2 * perPage, seen.size());
+        assertEquals(2, harness.requests().size());
+    }
+
     @Test
     void problemMembersAreTyped() {
         harness.script("createDub", Map.of("problem", "insufficient_balance"));
@@ -189,6 +215,42 @@ class TypedSurfaceTest {
         harness.script("getMe", Map.of("problem", "rate_limited", "retry_after", 130));
         RateLimitError error = assertThrows(RateLimitError.class, () -> rask.account().getMe());
         assertEquals(Duration.ofSeconds(130), error.retryAfter().orElse(null));
+    }
+
+    /** No budget holds such a wait, so the call ends at once, with the server's wait on the error and capped. */
+    @Test
+    void aRetryAfterBeyondAnyBudgetEndsRetryingAtOnce() {
+        harness.script("getMe",
+                Map.of("problem", "rate_limited", "retry_after", "9223372036854775807", "repeat", "forever"));
+        RateLimitError error = assertThrows(RateLimitError.class, () -> rask.account().getMe());
+        assertEquals(Duration.ofSeconds(1L << 31), error.retryAfter().orElse(null));
+        assertEquals(1, harness.requests().size());
+    }
+
+    /** The wait is added to the time the call has taken so far, and the sum must not wrap round into a long sleep. */
+    @Test
+    void aHugeRetryAfterOnALaterAttemptEndsRetryingToo() {
+        harness.script("getMe", Map.of("problem", "rate_limited", "retry_after", 1),
+                Map.of("problem", "rate_limited", "retry_after", "9223372036854775", "repeat", "forever"));
+        assertTimeoutPreemptively(Duration.ofSeconds(10),
+                () -> assertThrows(RateLimitError.class, () -> rask.account().getMe()));
+        assertEquals(2, harness.requests().size());
+    }
+
+    /**
+     * A date in the year 9999 is more nanoseconds than a long holds, and 9223372036 seconds are too once a time is
+     * added to them. Neither may break the wait or outlast its timeout.
+     */
+    @Test
+    void aWaitEndsOnItsTimeoutWhateverRetryAfterSays() {
+        for (String retryAfter : List.of("Fri, 31 Dec 9999 23:59:59 GMT", "9223372036")) {
+            harness.post("/jobs", Map.of("id", "job-r", "type", "dub", "states", List.of("running"),
+                    "retry_after", retryAfter));
+            WaitTimeoutError error = assertTimeoutPreemptively(Duration.ofSeconds(10),
+                    () -> assertThrows(WaitTimeoutError.class, () -> rask.jobs().wait("job-r", Duration.ofSeconds(2))),
+                    retryAfter);
+            assertEquals(JobStatus.RUNNING, error.lastSeen().status(), retryAfter);
+        }
     }
 
     @Test

@@ -25,6 +25,7 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLException;
 import javax.net.ssl.TrustManagerFactory;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -121,6 +122,24 @@ class HttpsTest {
         Rask rask = Rask.builder().apiKey(KEY).baseUrl(baseUrl()).environment(Map.of())
                 .retryBudget(Duration.ZERO).build();
         assertThrows(RaskConnectionError.class, () -> rask.account().getMe());
+        assertEquals(List.of(), httpsSeen);
+    }
+
+    /**
+     * The certificate is the same on every attempt, so a retry only delays the error, and a wait that took it for an
+     * outage would end hours later as a timeout, without its cause.
+     */
+    @Test
+    void anUntrustedCertificateEndsACallAndAWaitAtOnce() {
+        List<String> logs = Collections.synchronizedList(new ArrayList<>());
+        Rask rask = Rask.builder().apiKey(KEY).baseUrl(baseUrl()).environment(Map.of())
+                .retryBudget(Duration.ofSeconds(5)).debug(true).logSink(logs::add).build();
+        assertThrows(RaskConnectionError.class, () -> rask.account().getMe());
+        RaskConnectionError error = assertThrows(RaskConnectionError.class,
+                () -> rask.jobs().wait("job-1", Duration.ofSeconds(5)));
+        assertTrue(error.getCause() instanceof SSLException, () -> String.valueOf(error.getCause()));
+        assertEquals(2, logs.stream().filter(line -> line.contains("> GET ")).count(),
+                () -> "one attempt of the call and one of the wait: " + logs);
         assertEquals(List.of(), httpsSeen);
     }
 

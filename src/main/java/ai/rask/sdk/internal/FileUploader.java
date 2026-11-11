@@ -21,6 +21,8 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.time.OffsetDateTime;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.Flow;
@@ -160,9 +162,9 @@ public final class FileUploader {
             int status = 0;
             Exception failure = null;
             if (!expired) {
-                try {
+                try (FileBody body = new FileBody(file, size)) {
                     Transport.Exchange answer = transport.putPresigned(single.url(), single.headers().asMap(),
-                            publisher(file, size, settings.onProgress()), timeout);
+                            counting(body, settings.onProgress()), timeout);
                     status = answer.status;
                     if (status >= 200 && status < 300) {
                         return;
@@ -196,11 +198,7 @@ public final class FileUploader {
         return scaled.compareTo(transport.timeout()) > 0 ? scaled : transport.timeout();
     }
 
-    private static HttpRequest.BodyPublisher publisher(Path file, long size, LongConsumer onProgress)
-            throws IOException {
-        // fromPublisher with the size sends the signed Content-Length, never chunked.
-        HttpRequest.BodyPublisher content = HttpRequest.BodyPublishers.fromPublisher(
-                HttpRequest.BodyPublishers.ofFile(file), size);
+    private static HttpRequest.BodyPublisher counting(HttpRequest.BodyPublisher content, LongConsumer onProgress) {
         return onProgress == null ? content : new CountingPublisher(content, onProgress);
     }
 
@@ -210,6 +208,62 @@ public final class FileUploader {
         } catch (RuntimeException ignored) {
             // A progress callback must not fail the upload.
             return;
+        }
+    }
+
+    /**
+     * The file as the body of one PUT. The HTTP client closes a body's stream only when it has read it to its end, so
+     * the stream of a PUT that ended sooner (storage refused it, the connection broke, the timeout passed) would stay
+     * open until the garbage collector found it, and with it the disk space of a temporary copy already deleted. This
+     * body keeps what it opens, and closing it closes that.
+     */
+    private final class FileBody implements HttpRequest.BodyPublisher, AutoCloseable {
+        private final Path file;
+        private final long size;
+        private final List<InputStream> opened = new ArrayList<>();
+        private boolean closed;
+
+        FileBody(Path file, long size) {
+            this.file = file;
+            this.size = size;
+        }
+
+        /** The size given here is the signed Content-Length, so the body is never sent chunked. */
+        @Override
+        public long contentLength() {
+            return size;
+        }
+
+        @Override
+        public void subscribe(Flow.Subscriber<? super ByteBuffer> subscriber) {
+            HttpRequest.BodyPublishers.ofInputStream(this::open).subscribe(subscriber);
+        }
+
+        /** Each subscription reads the file from its start: a redirect of the PUT is another one. */
+        private synchronized InputStream open() {
+            if (closed) {
+                // The PUT is over. Without a stream the HTTP client fails whatever asked for one this late.
+                return null;
+            }
+            try {
+                InputStream stream = Files.newInputStream(file);
+                opened.add(stream);
+                return stream;
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+        }
+
+        @Override
+        public synchronized void close() {
+            closed = true;
+            for (InputStream stream : opened) {
+                try {
+                    stream.close();
+                } catch (IOException e) {
+                    transport.log("could not close the upload file: " + e);
+                }
+            }
         }
     }
 

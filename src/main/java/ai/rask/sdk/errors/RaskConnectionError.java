@@ -1,6 +1,9 @@
 package ai.rask.sdk.errors;
 
-/** No HTTP answer: the connection failed on the last attempt and the retries ran out. */
+/**
+ * No HTTP answer: the connection failed on the last attempt and the retries ran out, or it failed in a way no retry
+ * mends, such as a certificate that fails verification.
+ */
 public class RaskConnectionError extends RaskError {
     private static final long serialVersionUID = 1L;
 
