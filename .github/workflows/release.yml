@@ -51,6 +51,15 @@ jobs:
           server-password: CENTRAL_PASSWORD
           gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
           gpg-passphrase: MAVEN_GPG_PASSPHRASE
+      # Central checks every signature against the public key on a key server. Sent from here, the key is there
+      # whether or not the machine it was made on could reach the server. A server that is down is not a failure:
+      # Central reads several.
+      - name: The public key is on the key servers
+        run: |
+          fingerprint=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/{print $10; exit}')
+          for server in keyserver.ubuntu.com keys.openpgp.org; do
+            gpg --keyserver "hkps://$server" --send-keys "$fingerprint" || echo "::warning::The key was not sent to $server."
+          done
       - name: The version is new
         run: |
           version=$(mvn -B -ntp -q -DforceStdout help:evaluate -Dexpression=project.version)
