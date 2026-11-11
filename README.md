@@ -61,9 +61,17 @@ HttpClient http = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NO
 for (Output output : rask.exports().listProjectOutputs(processing.projectId()).data().data()) {
     if (output.url() != null && output.filename() != null) {
         Path target = Path.of(output.filename()).getFileName();
-        HttpResponse<Path> saved = http.send(HttpRequest.newBuilder(URI.create(output.url())).build(),
-                HttpResponse.BodyHandlers.ofFile(target));
-        System.out.println(output.kind() + " " + saved.statusCode() + " " + target);
+        HttpResponse<InputStream> download = http.send(
+                HttpRequest.newBuilder(URI.create(output.url())).build(),
+                HttpResponse.BodyHandlers.ofInputStream());
+        try (InputStream body = download.body()) {
+            // Storage answers an expired URL with an error page, which must not be saved as the file.
+            if (download.statusCode() != 200) {
+                throw new IOException(output.kind() + ": the download answered " + download.statusCode());
+            }
+            Files.copy(body, target, StandardCopyOption.REPLACE_EXISTING);
+        }
+        System.out.println(output.kind() + " " + download.statusCode() + " " + target);
     }
 }
 ```
@@ -82,11 +90,11 @@ read.etag();             // also location(), requestId(), idempotentReplayed(), 
 
 - **Retries:** 429, 502, 503, 504, connection errors and timeouts, for up to 120 s, honouring `Retry-After`. A
   `Retry-After` longer than what is left of the 120 s ends the retries at once. 500, 409, 412 and 428 are not retried,
-  except `idempotency_key_in_use`, up to 3 times.
+  except `idempotency_key_in_use`, up to 3 times. Neither is a certificate that fails verification.
 - **Idempotency:** POST, PATCH and PUT, and `deleteSegment`, send a UUIDv4 `Idempotency-Key` per call, the same across its
   retries and readable as `idempotencyKey()` on results and errors. Pass your own with `RequestOptions`.
 - **Paging:** `listProjects(params)` returns a page; `listProjectsAutoPaging(params)` walks all of them lazily, as an
-  `Iterable` or with `.stream()`.
+  `Iterable` or with `.stream()`. A cursor the server has already given raises a `RaskError`, not an endless walk.
 - **Jobs:** `rask.jobs().wait(jobId)` waits up to 4 h and raises `JobFailedError`, `JobCanceledError` or
   `WaitTimeoutError`. A timeout leaves the job running.
 - **Uploads:** `rask.uploads().uploadFile(path or stream, options)` returns the `media_import` job. A stream goes to a

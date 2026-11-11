@@ -8,10 +8,15 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import ai.rask.sdk.errors.RaskConfigError;
+import ai.rask.sdk.errors.RaskConnectionError;
 import ai.rask.sdk.errors.RaskError;
+import ai.rask.sdk.errors.UploadFailedError;
 import ai.rask.sdk.internal.Json;
 import ai.rask.sdk.model.CreateFolderRequest;
+import java.io.IOException;
 import java.lang.reflect.Method;
+import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -199,6 +204,43 @@ class BaseUrlTest {
                 CreateFolderRequest.builder().name("x").build()));
         assertEquals(307, error.status());
         assertEquals(List.of(), onListener("other"));
+    }
+
+    /**
+     * A Location that is a URL, but one no request can be made of: no host, or a port that does not exist. There is
+     * nothing to follow and nothing a retry would mend, so the redirect is the answer, as when the Location is no URL.
+     */
+    @Test
+    void aRedirectNoRequestCanBeMadeOfIsTheAnswer() {
+        for (String location : List.of("http:///nowhere", "http://127.0.0.1:99999/me")) {
+            harness.reset();
+            harness.script("getMe",
+                    Map.of("redirect", Map.of("to", location, "status", 307), "repeat", "forever"));
+            Rask rask = client(harness.baseUrl).retryBudget(Duration.ofSeconds(2)).build();
+            RaskError error = assertThrows(RaskError.class, () -> rask.account().getMe(), location);
+            assertFalse(error instanceof RaskConnectionError, () -> location + ": " + error);
+            assertEquals(307, error.status(), location);
+            assertEquals(1, harness.requests().size(), location);
+        }
+    }
+
+    /** The HTTP client refuses such a port before it connects. That is no outage, so no retry is spent on it. */
+    @Test
+    void aBaseUrlNoRequestCanBeMadeOfIsNotRetriedAsAConnectionError() {
+        Rask rask = client("http://127.0.0.1:99999/v3").retryBudget(Duration.ofSeconds(2)).build();
+        assertThrows(IllegalArgumentException.class, () -> rask.account().getMe());
+    }
+
+    /** The same refusal for the URL storage is to be reached at: it is the upload that failed, with its id. */
+    @Test
+    void aStorageUrlNoRequestCanBeMadeOfIsAnUploadFailure() throws IOException {
+        harness.script("createUpload", Map.of("patch", Map.of("transfer",
+                Map.of("url", "http://127.0.0.1:99999/object?X-Amz-Signature=s"))));
+        Rask rask = client(harness.baseUrl).build();
+        Path file = Harness.contentFile(4096);
+        UploadFailedError failed = assertThrows(UploadFailedError.class, () -> rask.uploads().uploadFile(file));
+        assertNotNull(failed.uploadId());
+        assertTrue(failed.getCause() instanceof IllegalArgumentException);
     }
 
     private List<Map<String, Object>> onListener(String listener) {

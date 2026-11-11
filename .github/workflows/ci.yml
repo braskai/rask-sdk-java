@@ -1,10 +1,11 @@
-# Builds, lints and tests. Nothing here publishes.
+# Builds, lints and tests. Nothing here publishes: release.yml calls this before it does.
 name: CI
 
 on:
   pull_request:
   push:
     branches: [main, initial]
+  workflow_call:
 
 permissions:
   contents: read
@@ -14,6 +15,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -23,6 +26,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -38,9 +43,12 @@ jobs:
         java: ["11", "21"]
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       # The shared acceptance harness is its own repository.
       - uses: actions/checkout@v4
         with:
+          persist-credentials: false
           repository: braskai/rask-sdk-acceptance
           path: rask-sdk-acceptance
       - uses: actions/setup-node@v4
