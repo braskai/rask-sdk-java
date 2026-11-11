@@ -16,7 +16,7 @@ A release is one run of the `Release` workflow. It publishes the artifact to Mav
 The workflow refuses to run from any other branch, and refuses a version that is already tagged or already on Central.
 A version on Maven Central cannot be replaced or removed: to fix one, release the next.
 If a run fails after Central took the version, make the release by hand:
-`gh release create v<version> --target <the commit> --generate-notes`.
+`gh release create v<version> --target <the commit> --generate-notes`, with `--prerelease` for a pre-release version.
 
 ## Set up once
 
