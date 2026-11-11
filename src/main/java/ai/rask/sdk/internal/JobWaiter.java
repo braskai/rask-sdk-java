@@ -71,6 +71,11 @@ public final class JobWaiter {
                 }
                 pause = response.retryAfter().orElse(DEFAULT_PAUSE);
             } catch (RaskConnectionError e) {
+                // What the call itself does not retry is the same on the next poll. Taken for an outage, it would
+                // come back when the wait ran out, as a timeout without its cause.
+                if (!Transport.mayPass(e.getCause())) {
+                    throw e;
+                }
                 pause = DEFAULT_PAUSE;
             } catch (RaskError e) {
                 if (e instanceof JobFailedError || e instanceof JobCanceledError || !TRANSIENT.contains(e.status())) {
