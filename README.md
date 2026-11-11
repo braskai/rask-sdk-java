@@ -2,12 +2,11 @@
 
 Java client for the [Rask API v3](https://docs.api.rask.ai): video and audio localization.
 
-**Status: 3.0.0-alpha.0, not published.** The API itself is alpha and may still change. Java 11 or newer. No runtime
-dependencies.
+**Status: 3.0.0-alpha.0.** The API itself is alpha and may still change. Java 11 or newer. No runtime dependencies.
 
 ## Install
 
-Once published (Maven Central `ai.rask:rask-sdk`):
+From Maven Central, as [ai.rask:rask-sdk](https://central.sonatype.com/artifact/ai.rask/rask-sdk):
 
 ```xml
 <dependency>
@@ -17,7 +16,7 @@ Once published (Maven Central `ai.rask:rask-sdk`):
 </dependency>
 ```
 
-Until then, `mvn install` from this repository puts it in your local Maven repository.
+With Gradle: `implementation("ai.rask:rask-sdk:3.0.0-alpha.0")`.
 
 ## Client and base URL
 
