@@ -1,0 +1,64 @@
+# Publishes ai.rask:rask-sdk to Maven Central when a GitHub Release is published.
+# The release tag is "v" + the version in pom.xml, on a commit of the default branch.
+# The environment `maven-central` takes only `v*` tags and holds four secrets: CENTRAL_USERNAME and CENTRAL_PASSWORD (a
+# user token of central.sonatype.com, where the namespace ai.rask is verified), GPG_PRIVATE_KEY and GPG_PASSPHRASE (the
+# key the artifacts are signed with). RELEASING.md has the steps.
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Publish to Maven Central
+    needs: checks
+    runs-on: ubuntu-24.04
+    environment: maven-central
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # Writes a settings.xml that reads the Central token from the environment, and imports the signing key.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+          server-id: central
+          server-username: CENTRAL_USERNAME
+          server-password: CENTRAL_PASSWORD
+          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
+          gpg-passphrase: MAVEN_GPG_PASSPHRASE
+      - name: The tag is this version, on the default branch
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          version=$(mvn -B -ntp -q -DforceStdout help:evaluate -Dexpression=project.version)
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::The release tag is $TAG and pom.xml says $version: the tag must be v$version."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" "origin/$DEFAULT_BRANCH"; then
+            echo "::error::$TAG is not on $DEFAULT_BRANCH: a release is cut from reviewed code only."
+            exit 1
+          fi
+      # The tests ran in `checks`. The profile adds the sources and javadoc jars and the signatures, uploads the bundle
+      # and waits until Central has published it.
+      - name: Publish
+        env:
+          CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
+          CENTRAL_PASSWORD: ${{ secrets.CENTRAL_PASSWORD }}
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: mvn -B -ntp -Prelease -DskipTests deploy
