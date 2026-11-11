@@ -173,6 +173,11 @@ public final class FileUploader {
                             && new String(answer.body, StandardCharsets.UTF_8).contains("Request has expired");
                 } catch (IOException | TimeoutException e) {
                     failure = e;
+                } catch (IllegalArgumentException e) {
+                    // The HTTP client's word for a URL no request can be made of, a port out of range for one. It is
+                    // storage that cannot be reached, so the upload failed, and the same on every attempt.
+                    throw new UploadFailedError("The PUT to storage failed after " + (failures + 1) + " attempt(s)", 0,
+                            upload.id(), e);
                 }
             }
             if (expired) {

@@ -10,9 +10,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import ai.rask.sdk.errors.RaskConfigError;
 import ai.rask.sdk.errors.RaskConnectionError;
 import ai.rask.sdk.errors.RaskError;
+import ai.rask.sdk.errors.UploadFailedError;
 import ai.rask.sdk.internal.Json;
 import ai.rask.sdk.model.CreateFolderRequest;
+import java.io.IOException;
 import java.lang.reflect.Method;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -226,6 +229,18 @@ class BaseUrlTest {
     void aBaseUrlNoRequestCanBeMadeOfIsNotRetriedAsAConnectionError() {
         Rask rask = client("http://127.0.0.1:99999/v3").retryBudget(Duration.ofSeconds(2)).build();
         assertThrows(IllegalArgumentException.class, () -> rask.account().getMe());
+    }
+
+    /** The same refusal for the URL storage is to be reached at: it is the upload that failed, with its id. */
+    @Test
+    void aStorageUrlNoRequestCanBeMadeOfIsAnUploadFailure() throws IOException {
+        harness.script("createUpload", Map.of("patch", Map.of("transfer",
+                Map.of("url", "http://127.0.0.1:99999/object?X-Amz-Signature=s"))));
+        Rask rask = client(harness.baseUrl).build();
+        Path file = Harness.contentFile(4096);
+        UploadFailedError failed = assertThrows(UploadFailedError.class, () -> rask.uploads().uploadFile(file));
+        assertNotNull(failed.uploadId());
+        assertTrue(failed.getCause() instanceof IllegalArgumentException);
     }
 
     private List<Map<String, Object>> onListener(String listener) {

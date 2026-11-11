@@ -4,10 +4,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 import ai.rask.sdk.internal.Json;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -15,6 +17,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -33,8 +36,7 @@ class SmokeProgramTest {
         harness.reset();
         harness.post("/pages", Map.of("operationId", "listProjects", "pages", 2, "page_size", 1));
         Process process = start(harness.apiKey, harness.baseUrl + "/", "examples/smoke/Smoke.java");
-        String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-        assertTrue(process.waitFor(60, TimeUnit.SECONDS));
+        String output = outputOf(process);
         assertEquals(0, process.exitValue(), output);
         assertFalse(output.contains(harness.apiKey), "the key was printed");
         for (String call : List.of("getMe 200", "listLanguages 200", "listVoices 200", "listProjects[1] 200",
@@ -75,8 +77,7 @@ class SmokeProgramTest {
         scriptTheWorkedExample(harness.otherBaseUrl + "/download");
         Path file = Harness.contentFile(4096);
         Process process = start(harness.apiKey, harness.baseUrl, "examples/worked/WorkedExample.java", file.toString());
-        String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-        assertTrue(process.waitFor(60, TimeUnit.SECONDS));
+        String output = outputOf(process);
         assertEquals(0, process.exitValue(), output);
         assertFalse(output.contains(harness.apiKey), "the key was printed");
         List<String> order = new ArrayList<>();
@@ -117,8 +118,7 @@ class SmokeProgramTest {
             scriptTheWorkedExample("http://127.0.0.1:" + storage.getAddress().getPort() + "/expired");
             Process process = startIn(directory, harness.apiKey, harness.baseUrl,
                     "examples/worked/WorkedExample.java", Harness.contentFile(4096).toString());
-            String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-            assertTrue(process.waitFor(60, TimeUnit.SECONDS));
+            String output = outputOf(process);
             assertNotEquals(0, process.exitValue(), output);
             assertTrue(output.contains("403"), output);
             try (Stream<Path> saved = Files.list(directory)) {
@@ -133,8 +133,7 @@ class SmokeProgramTest {
     void aMissingKeyFailsWithoutARequest() throws IOException, InterruptedException {
         harness.reset();
         Process process = start(null, harness.baseUrl, "examples/smoke/Smoke.java");
-        String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-        assertTrue(process.waitFor(60, TimeUnit.SECONDS));
+        String output = outputOf(process);
         assertEquals(1, process.exitValue(), output);
         assertTrue(output.contains("RASK_API_KEY"), output);
         assertEquals(List.of(), harness.requests());
@@ -144,12 +143,30 @@ class SmokeProgramTest {
     void aMissingBaseUrlFailsWithoutARequest() throws IOException, InterruptedException {
         harness.reset();
         Process process = start(harness.apiKey, null, "examples/smoke/Smoke.java");
-        String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-        assertTrue(process.waitFor(60, TimeUnit.SECONDS));
+        String output = outputOf(process);
         assertEquals(1, process.exitValue(), output);
         assertTrue(output.contains("RASK_BASE_URL"), output);
         assertFalse(output.contains("getMe"), output);
         assertEquals(List.of(), harness.requests());
+    }
+
+    /**
+     * What the program printed, once it has ended. The output is read on another thread: read here first, a program
+     * that never ended would hold the test for ever, and the wait below would never start. One that hangs is killed.
+     */
+    private static String outputOf(Process process) throws InterruptedException {
+        CompletableFuture<byte[]> output = CompletableFuture.supplyAsync(() -> {
+            try {
+                return process.getInputStream().readAllBytes();
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+        });
+        if (!process.waitFor(60, TimeUnit.SECONDS)) {
+            process.destroyForcibly();
+            fail("the program did not end in 60 s");
+        }
+        return new String(output.join(), StandardCharsets.UTF_8);
     }
 
     private static Process start(String apiKey, String baseUrl, String... program) throws IOException {
